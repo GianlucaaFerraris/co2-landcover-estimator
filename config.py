@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── API ───────────────────────────────────────────────────────────────────────
-GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
+# No API key required for ESRI World Imagery tiles
 
 # ── Satellite imagery defaults ────────────────────────────────────────────────
 DEFAULT_ZOOM: int = 12      # 10 = ~40 km across · 14 = ~2.5 km across
