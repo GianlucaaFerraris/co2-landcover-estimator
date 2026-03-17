@@ -1,0 +1,19 @@
+# co2-landcover-estimator — Python dependencies
+# Install with:  pip install -r requirements.txt
+
+# ── Core ──────────────────────────────────────────────────────────────────────
+numpy>=1.24
+scipy>=1.11
+opencv-python>=4.8
+Pillow>=10.0
+requests>=2.31
+python-dotenv>=1.0
+matplotlib>=3.8
+
+# ── Optional: high-resolution land-mask (recommended) ────────────────────────
+# cartopy>=0.22
+# shapely>=2.0
+
+# ── Optional: ML segmentation mode (--mode ml) ───────────────────────────────
+# torch>=2.1
+# transformers>=4.38
