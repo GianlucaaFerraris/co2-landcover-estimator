@@ -1,216 +1,99 @@
 """
-src/co2_model.py
-================
-CO₂ flux estimation using a Net Ecosystem Exchange (NEE) approach.
-
-Physical model
---------------
-We model the rate of change of CO₂ concentration inside the planetary
-boundary layer (PBL) above the analysed area as:
-
-    dC/dt = F_total / (ρ_air · h · MW_ratio)              … (1)
-
-where
-
-    F_total [gC · m⁻² · yr⁻¹]  = Σᵢ  fᵢ · Fᵢ
-    fᵢ                           = fractional cover of class i
-    Fᵢ                           = literature flux for class i (config.py)
-    ρ_air  [g · m⁻³]            = 1225 g/m³
-    h      [m]                   = boundary-layer height (default 1000 m)
-    MW_ratio                     = (M_CO₂ / M_C) / M_air_per_mol
-
-The ODE is solved with ``scipy.integrate.solve_ivp`` (RK45).
-
-The output ΔC_ppm is the change in column-average CO₂ concentration (ppm)
-over the chosen time horizon.  This is a **local, zonal** estimate; it does
-*not* account for horizontal mixing with the background atmosphere.
-
-References
-----------
-Chapin F.S. III et al. (2011) "Principles of Terrestrial Ecosystem Ecology".
-Sitch S. et al. (2015) Biogeosciences 12, 653–679.
-Churkina G. et al. (2010) Global Change Biology 16, 2296–2309.
+src/co2_model.py  —  NEE-based CO₂ flux model
 """
-
 from __future__ import annotations
-
-from typing import Dict
-
+import math
+from typing import Dict, Optional
 import numpy as np
-from scipy.integrate import solve_ivp
 
 from config import (
-    CO2_FLUX_BY_COVER,
-    CO2_FLUX_UNCLASSIFIED,
-    BOUNDARY_LAYER_HEIGHT_M,
-    MOLAR_MASS_CO2,
-    MOLAR_MASS_C,
-    MOLAR_MASS_AIR,
-    AIR_DENSITY_KG_M3,
+    CO2_FLUX_BY_COVER, CO2_FLUX_UNCLASSIFIED,
+    MOLAR_MASS_CO2, MOLAR_MASS_C,
+    TREE_CO2_KG_PER_YEAR, TREE_CANOPY_M2,
 )
 
 CoverFractions = Dict[str, float]
+_ATM_CARBON_MASS_GC = 8.60e17   # IPCC AR6 — total atmospheric carbon [gC]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+def image_area_m2(lat: float, zoom: int, size_px: int = 512) -> float:
+    res = 156_543.03392 * math.cos(math.radians(lat)) / (2 ** zoom)
+    return (res * size_px) ** 2
 
-def _net_flux_gC_m2_yr(cover: CoverFractions) -> float:
+
+def _build_flux_table(cover: CoverFractions, urban_flux: float) -> Dict[str, float]:
+    t = dict(CO2_FLUX_BY_COVER)
+    t["urban"] = urban_flux
+    return t
+
+
+def _net_flux(cover: CoverFractions, flux_table: Dict[str, float]) -> float:
+    return sum(f * flux_table.get(l, CO2_FLUX_UNCLASSIFIED) for l, f in cover.items())
+
+
+def global_ppm_contribution(net_flux_gC_m2_yr: float, area_m2: float) -> float:
+    """Zone's honest contribution to global atmospheric CO₂ (ppm/yr)."""
+    return (net_flux_gC_m2_yr * area_m2 / _ATM_CARBON_MASS_GC) * 1e6
+
+
+def estimate_trees(net_flux_gC_m2_yr: float, area_m2: float) -> dict:
     """
-    Weighted sum of per-cover-type CO₂ fluxes.
-
-    Parameters
-    ----------
-    cover : CoverFractions
-        Output of ``segmentation.segment_image``.
-
-    Returns
-    -------
-    float
-        Net flux in gC · m⁻² · yr⁻¹.
-        Negative  → zone is a carbon **sink**.
-        Positive  → zone is a carbon **source**.
+    Tree equivalence.
+    - Source: trees needed to offset total emission (anywhere, not per ha).
+    - Sink:   equivalent trees worth of absorption already happening.
     """
-    flux = 0.0
-    for label, fraction in cover.items():
-        f_unit = CO2_FLUX_BY_COVER.get(label, CO2_FLUX_UNCLASSIFIED)
-        flux += fraction * f_unit
-    return flux
+    total_gC_yr    = net_flux_gC_m2_yr * area_m2
+    total_kgCO2_yr = abs(total_gC_yr * (MOLAR_MASS_CO2 / MOLAR_MASS_C) / 1000.0)
+    area_ha        = area_m2 / 10_000.0
+    is_sink        = net_flux_gC_m2_yr < 0
+    trees          = math.ceil(total_kgCO2_yr / TREE_CO2_KG_PER_YEAR)
+    # Equivalent forest area (at 400 trees/ha dense urban forest)
+    forest_ha      = trees / 400.0
 
+    return {
+        "is_sink":        is_sink,
+        "kgCO2_yr":       total_kgCO2_yr,
+        "tonnes_CO2_yr":  total_kgCO2_yr / 1000.0,
+        "trees":          trees,
+        "forest_ha":      forest_ha,   # ha of forest needed, NOT trees/ha of the zone
+        "area_ha":        area_ha,
+    }
 
-def _build_ode(net_flux_gC_m2_yr: float) -> callable:
-    """
-    Return the right-hand side function for the CO₂ ODE.
-
-    The ODE is:
-        dC/dt = net_flux_gC_m2_yr
-                / (rho_air_g_m3 · h · (M_C / M_CO2) · (1 / M_air) · 1e6)
-
-    Simplified to a unit conversion constant × flux.
-
-    The factor converts gC/m²/yr → ppm_CO₂/yr in the PBL column.
-    """
-    # Air mass per m² of PBL column [g/m²]
-    rho_g_m3 = AIR_DENSITY_KG_M3 * 1000.0          # kg/m³ → g/m³
-    air_column_g_m2 = rho_g_m3 * BOUNDARY_LAYER_HEIGHT_M
-
-    # gC → gCO₂
-    flux_gCO2 = net_flux_gC_m2_yr * (MOLAR_MASS_CO2 / MOLAR_MASS_C)
-
-    # gCO₂/m² → mol_CO₂/m²
-    flux_mol_CO2 = flux_gCO2 / MOLAR_MASS_CO2
-
-    # mol_air per m² of column
-    mol_air_col = air_column_g_m2 / MOLAR_MASS_AIR
-
-    # ppm change per year (mol fraction × 1e6)
-    dppm_per_year = (flux_mol_CO2 / mol_air_col) * 1e6
-
-    def rhs(t: float, y: list[float]) -> list[float]:  # noqa: ANN001
-        return [dppm_per_year]
-
-    return rhs, dppm_per_year
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Public interface
-# ─────────────────────────────────────────────────────────────────────────────
 
 def estimate_co2_flux(
     cover: CoverFractions,
-    years: float = 1.0,
+    lat: float = 0.0,
+    zoom: int = 15,
+    size_px: int = 512,
+    urban_flux: Optional[float] = None,
+    years: float = 10.0,
     C0_ppm: float = 420.0,
 ) -> dict:
-    """
-    Solve the CO₂ flux ODE and return a summary dictionary.
-
-    Parameters
-    ----------
-    cover : CoverFractions
-        Land-cover fractions from ``segmentation.segment_image``.
-    years : float
-        Time horizon for the ODE integration (default: 1 year).
-    C0_ppm : float
-        Initial atmospheric CO₂ concentration in ppm (default: 420 ppm,
-        approximate global average for 2024).
-
-    Returns
-    -------
-    dict with keys:
-        ``net_flux_gC_m2_yr``  – Net flux (gC/m²/yr, neg = sink).
-        ``delta_C_ppm``        – Change in PBL CO₂ over the time horizon.
-        ``C_final_ppm``        – Final CO₂ concentration in PBL (ppm).
-        ``t``                  – Time array (years).
-        ``C``                  – CO₂ concentration array (ppm) over time.
-        ``is_sink``            – Boolean, True if zone absorbs CO₂.
-        ``cover``              – Echo of the input cover fractions.
-
-    Examples
-    --------
-    >>> cover = {"vegetation": 0.7, "water": 0.1, "arid": 0.1, "urban": 0.1}
-    >>> result = estimate_co2_flux(cover)
-    >>> result["is_sink"]
-    True
-    >>> result["net_flux_gC_m2_yr"] < 0
-    True
-    """
-    net_flux = _net_flux_gC_m2_yr(cover)
-    rhs, dppm_per_year = _build_ode(net_flux)
-
-    t_span = (0.0, years)
-    t_eval = np.linspace(0.0, years, max(200, int(years * 200)))
-
-    sol = solve_ivp(
-        rhs,
-        t_span,
-        [C0_ppm],
-        t_eval=t_eval,
-        method="RK45",
-        rtol=1e-6,
-    )
-
-    C_array = sol.y[0]
-    delta_C = float(C_array[-1] - C_array[0])
+    u_flux     = urban_flux if urban_flux is not None else CO2_FLUX_BY_COVER["urban"]
+    flux_table = _build_flux_table(cover, u_flux)
+    net_flux   = _net_flux(cover, flux_table)
+    area       = image_area_m2(lat, zoom, size_px)
+    tree_data  = estimate_trees(net_flux, area)
+    gppm       = global_ppm_contribution(net_flux, area)
 
     return {
         "net_flux_gC_m2_yr": net_flux,
-        "delta_C_ppm": delta_C,
-        "dppm_per_year": dppm_per_year,
-        "C_final_ppm": float(C_array[-1]),
-        "C0_ppm": C0_ppm,
-        "t": sol.t,
-        "C": C_array,
-        "is_sink": net_flux < 0,
-        "cover": cover,
-        "years": years,
+        "is_sink":           net_flux < 0,
+        "area_m2":           area,
+        "trees":             tree_data,
+        "global_ppm_yr":     gppm,
+        "urban_flux_used":   u_flux,
+        "flux_table":        flux_table,
+        "cover":             cover,
+        "years":             years,
+        "C0_ppm":            C0_ppm,
+        "delta_C_ppm":       0.0,   # legacy
     }
 
 
-def flux_sensitivity_table(cover: CoverFractions) -> Dict[str, float]:
-    """
-    Show the contribution (gC/m²/yr) of each land-cover class independently.
-
-    Useful for understanding which class dominates the signal.
-
-    Parameters
-    ----------
-    cover : CoverFractions
-
-    Returns
-    -------
-    Dict mapping label → individual flux contribution.
-
-    Examples
-    --------
-    >>> cover = {"vegetation": 0.5, "urban": 0.5}
-    >>> table = flux_sensitivity_table(cover)
-    >>> table["vegetation"]
-    -200.0
-    >>> table["urban"]
-    750.0
-    """
-    return {
-        label: fraction * CO2_FLUX_BY_COVER.get(label, CO2_FLUX_UNCLASSIFIED)
-        for label, fraction in cover.items()
-    }
+def flux_sensitivity_table(
+    cover: CoverFractions,
+    flux_table: Optional[Dict[str, float]] = None,
+) -> Dict[str, float]:
+    table = flux_table or CO2_FLUX_BY_COVER
+    return {l: f * table.get(l, CO2_FLUX_UNCLASSIFIED) for l, f in cover.items()}

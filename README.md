@@ -1,60 +1,61 @@
 # 🌍 CO₂ Land-Cover Estimator
 
-> Estimate whether a random spot on Earth is a carbon **sink** or **source** using satellite imagery, computer vision, and a Net Ecosystem Exchange (NEE) differential equation model.
+> Analyse any spot on Earth from satellite imagery and estimate whether that zone is a carbon **sink** or **source** — plus how many trees you'd need to plant to offset its emissions.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
+![No API key](https://img.shields.io/badge/Satellite%20imagery-free%2C%20no%20key-brightgreen)
 
 ---
 
 ## ✨ What it does
 
-1. **Picks a random land coordinate** on Earth (or uses one you provide).
-2. **Fetches a satellite image** via the Google Maps Static API.
-3. **Segments the image** into four land-cover types using either:
-   - 🎨 **HSV colour-range masks** (fast, offline, default)
-   - 🤖 **SegFormer-B2** semantic segmentation (more accurate, needs `torch`)
-4. **Solves an ODE** (dC/dt = F_total / h) to estimate the net CO₂ flux over the zone.
-5. **Renders a 4-panel figure** showing the satellite image, segmentation overlay, land-cover composition donut chart, and the CO₂ concentration trajectory.
+1. **Picks a random land coordinate** on Earth, or uses one you provide.
+2. **Fetches a satellite image** via ESRI World Imagery tiles — **completely free, no API key, no account needed**.
+3. **Segments the image** into four land-cover types (vegetation, water, arid, urban) using a **hybrid model**:
+   - HSV colour masks for water and vegetation (very accurate by colour signature)
+   - SegFormer-B2 (NVIDIA, HuggingFace) for urban vs. arid distinction
+4. **Calibrates the urban CO₂ flux** by querying population density from WorldPop (free REST API), so a suburb in Córdoba is not treated the same as central Tokyo.
+5. **Estimates net CO₂ flux** using a Net Ecosystem Exchange (NEE) weighted model.
+6. **Calculates how many trees** would need to be planted to offset the zone's emissions (or the tree-equivalent for sinks).
+7. **Renders a clear, infographic-style figure** designed to be understood by anyone — from a curious neighbour to a climate scientist.
 
 ---
 
 ## 🧮 The physics — Net Ecosystem Exchange
 
-The model is grounded in the **NEE** framework used in terrestrial ecology:
+The model uses the standard **NEE** framework from terrestrial ecology:
 
 ```
-NEE = RE − GPP
+F_total [gC·m⁻²·yr⁻¹] = Σᵢ fᵢ · Fᵢ
 ```
 
-where **RE** is ecosystem respiration (emits CO₂) and **GPP** is gross primary production (absorbs CO₂ through photosynthesis).
-
-We approximate this as a **linear weighted sum** over land-cover classes:
-
-```
-F_total [gC·m⁻²·yr⁻¹] = Σ fᵢ · Fᵢ
-```
+where `fᵢ` is the fractional cover of each land-cover class and `Fᵢ` is its literature flux:
 
 | Cover type | Fᵢ (gC·m⁻²·yr⁻¹) | Role |
 |---|---|---|
 | 🌿 Dense vegetation | −400 | Strong **sink** |
 | 💧 Water bodies | −20 | Weak sink |
 | 🏜️ Arid / bare soil | +20 | Near-neutral |
-| 🏙️ Urban | +1500 | Strong **source** |
+| 🏙️ Urban | **dynamic** | Calibrated by local population density |
 
-The ODE governing the boundary-layer CO₂ concentration C (ppm):
+The urban flux is not hardcoded — it scales with local population density fetched from WorldPop:
+
+| Density (hab/km²) | Example | Urban flux |
+|---|---|---|
+| < 500 | Small town / suburb | +200 gC/m²/yr |
+| 500–5 000 | Mid-size city (Córdoba) | +600 gC/m²/yr |
+| 5 000–20 000 | Dense city (Buenos Aires) | +1 200 gC/m²/yr |
+| > 20 000 | Megacity (Tokyo) | +1 500 gC/m²/yr |
+
+### Tree offset
 
 ```
-dC/dt = F_total / (ρ_air · h · MW_ratio)
+trees_needed = total_emission_kgCO₂_yr / 21 kgCO₂_per_tree_yr
+forest_ha    = trees_needed / 400 trees_per_ha
 ```
 
-- `ρ_air` = 1.225 kg/m³ (dry air at STP)
-- `h` = 1000 m (planetary boundary layer height)
-- `MW_ratio` converts gC → ppm_CO₂
-
-The ODE is solved with `scipy.integrate.solve_ivp` (RK45).
-
-> **Disclaimer:** This is a first-order approximation. It does not account for horizontal advection, seasonal variation, or sub-pixel heterogeneity. It is intended for educational exploration.
+> **Disclaimer:** First-order approximation. Does not account for horizontal advection, seasonal variation, or sub-pixel heterogeneity. Intended for educational exploration.
 
 ---
 
@@ -68,39 +69,36 @@ cd co2-landcover-estimator
 pip install -r requirements.txt
 ```
 
-### 2. Set your API key
+No API key or account is needed for basic usage.
+
+### 2. Run
 
 ```bash
-cp .env.example .env
-# Edit .env and paste your Google Maps Static API key
-```
-
-Or export it directly:
-
-```bash
-export GOOGLE_MAPS_API_KEY="your_key_here"
-```
-
-[Get a free API key →](https://developers.google.com/maps/documentation/maps-static/get-api-key)
-
-### 3. Run
-
-```bash
-# Random location (default HSV segmentation)
+# Random location, neighbourhood scale (default)
 python main.py
 
-# Fixed location — Cordoba, Argentina
-python main.py --lat -31.4 --lon -64.2
+# Fixed coordinates — centre of Córdoba, Argentina
+python main.py --lat -31.393 --lon -64.195
 
-# Use SegFormer ML segmentation (needs torch + transformers)
-python main.py --mode ml
+# City-wide view
+python main.py --lat -31.393 --lon -64.195 --scale ciudad
 
-# Save the output plot
-python main.py --output result.png
+# Neighbourhood view with ML segmentation (more accurate, needs torch)
+python main.py --lat -31.393 --lon -64.195 --scale barrio --mode ml
 
-# All options
-python main.py --lat -31.4 --lon -64.2 --mode hsv --zoom 12 --size 512 --years 1 --output out.png
+# Save the result figure
+python main.py --lat -31.393 --lon -64.195 --output result.png
 ```
+
+### 3. (Optional) Install ML segmentation
+
+For the more accurate hybrid segmentation mode (default when torch is available):
+
+```bash
+pip install torch transformers
+```
+
+The SegFormer-B2 model (~110 MB) downloads automatically on first use from HuggingFace.
 
 ---
 
@@ -109,75 +107,77 @@ python main.py --lat -31.4 --lon -64.2 --mode hsv --zoom 12 --size 512 --years 1
 ```
 co2-landcover-estimator/
 ├── main.py              # Entry point
-├── config.py            # All tuneable constants (flux values, HSV thresholds…)
+├── config.py            # All tuneable constants
 ├── requirements.txt
 ├── .env.example
 └── src/
     ├── geo.py           # Random land-coordinate generator
-    ├── imagery.py       # Google Maps Static API client
-    ├── segmentation.py  # HSV + SegFormer land-cover classifier
-    ├── co2_model.py     # NEE ODE model
-    └── visualizer.py    # 4-panel matplotlib figure
+    ├── imagery.py       # ESRI World Imagery tile fetcher (no key needed)
+    ├── segmentation.py  # HSV + SegFormer hybrid land-cover classifier
+    ├── density.py       # WorldPop population density → urban flux calibration
+    ├── co2_model.py     # NEE flux model + tree offset estimator
+    └── visualizer.py    # Infographic-style result figure
 ```
 
 ---
 
 ## ⚙️ Configuration
 
-All physics constants and thresholds live in **`config.py`**. Edit them to experiment:
+All physics constants and thresholds live in **`config.py`**:
 
 ```python
-# Flux values (gC·m⁻²·yr⁻¹) — change these to test sensitivity
+# Flux values (gC·m⁻²·yr⁻¹)
 CO2_FLUX_BY_COVER = {
     "vegetation": -400.0,
     "water":       -20.0,
     "arid":        +20.0,
-    "urban":      +1500.0,
+    "urban":      +600.0,   # overridden at runtime by density.py
 }
 
-# Boundary-layer height (m) — affects ΔC_ppm magnitude
-BOUNDARY_LAYER_HEIGHT_M = 1000.0
+# Tree sequestration (Nowak et al. 2013)
+TREE_CO2_KG_PER_YEAR = 21.0
+
+# Spatial scale presets
+SCALE_PRESETS = {
+    "barrio":  {"zoom": 15, "label": "Neighbourhood (~500 m)"},
+    "ciudad":  {"zoom": 12, "label": "City (~10 km)"},
+    "region":  {"zoom": 10, "label": "Region (~40 km)"},
+}
 ```
 
 ---
 
 ## 🔬 Segmentation modes
 
-### HSV (default `--mode hsv`)
-Classifies each pixel by its hue/saturation/value range. Fast and dependency-light. Works best at zoom levels 10–13 where colour signatures are distinct.
-
-### SegFormer (`--mode ml`)
-Uses [nvidia/segformer-b2-finetuned-ade-512-512](https://huggingface.co/nvidia/segformer-b2-finetuned-ade-512-512) from HuggingFace. The 150 ADE20k semantic labels are mapped to our four land-cover categories. More robust to lighting variation and mixed pixels.
-
-Extra install:
-```bash
-pip install torch transformers
-```
+| Mode | Description | Requires |
+|---|---|---|
+| `hybrid` | HSV for water/vegetation + SegFormer for urban/arid. **Best accuracy** (default). | `torch`, `transformers` |
+| `hsv` | Colour-range masks only. Fast, offline. | nothing extra |
+| `ml` | Full SegFormer segmentation. | `torch`, `transformers` |
 
 ---
 
-## 📊 Example output
+## 📊 Output
 
-```
-🌍 Picking a random land coordinate …
-📍 Selected: (3.7241, 18.6583)
-🛰  Fetching satellite image …
-🔍 Segmenting image (mode=hsv) …
-   vegetation=61.3%  water=4.2%  arid=18.5%  urban=7.1%
-🧮 Solving CO₂ flux ODE …
-   Net flux : -242.8 gC/m²/yr  →  SINK ✅
-   ΔC (1 yr): -0.0023 ppm over zone
-📊 Rendering results …
-```
+The result figure contains:
+
+- **Satellite image** of the analysed zone
+- **Segmented image** with colour-coded land cover (green=vegetation, red=urban, blue=water, yellow=arid)
+- **Cover composition** pie chart
+- **Zone summary** cards: CO₂/yr, tree equivalence, forest area needed
+- **Greenhouse impact thermometer** — vertical scale from dense forest (green) to megacity (red)
+- **Area comparison** — proportional squares showing the analysed zone vs the forest needed to compensate
 
 ---
 
 ## 📚 Scientific references
 
 - Chapin, F.S. III et al. (2011). *Principles of Terrestrial Ecosystem Ecology*. Springer.
-- Sitch, S. et al. (2015). Recent trends and drivers of regional sources and sinks of carbon dioxide. *Biogeosciences*, 12, 653–679.
-- Churkina, G. et al. (2010). Carbon stored in human settlements: the conterminous United States. *Global Change Biology*, 16, 2296–2309.
-- Xiao, J. et al. (2014). Carbon fluxes, evapotranspiration, and water use efficiency of terrestrial ecosystems in China. *Agricultural and Forest Meteorology*, 182–183, 76–90.
+- Sitch, S. et al. (2015). Biogeosciences, 12, 653–679.
+- Churkina, G. et al. (2010). Global Change Biology, 16, 2296–2309.
+- Kennedy, C. et al. (2011). Journal of Industrial Ecology, 15(1), 68–83.
+- Nowak, D.J. et al. (2013). Urban Forestry & Urban Greening, 12(4), 490–495.
+- WorldPop (2020). Global High Resolution Population Denominators Project. doi:10.5258/SOTON/WP00647
 
 ---
 

@@ -19,21 +19,42 @@ load_dotenv()
 DEFAULT_ZOOM: int = 12      # 10 = ~40 km across · 14 = ~2.5 km across
 DEFAULT_SIZE: int = 512     # pixels per side (Google cap = 640)
 
+# ── Spatial scale presets ─────────────────────────────────────────────────────
+# Used by --scale argument in main.py
+SCALE_PRESETS = {
+    "barrio":  {"zoom": 15, "label": "Neighbourhood (~500 m)"},
+    "ciudad":  {"zoom": 12, "label": "City (~10 km)"},
+    "region":  {"zoom": 10, "label": "Region (~40 km)"},
+}
+DEFAULT_SCALE = "barrio"
+
 # ── CO₂ flux constants (gC · m⁻² · yr⁻¹) ────────────────────────────────────
 # Positive  → source (emits CO₂ to atmosphere)
 # Negative  → sink   (absorbs CO₂ from atmosphere)
+#
+# NOTE: urban flux is now dynamic — scaled by population density via
+#       src/density.py. The value below is used only as a static fallback.
 #
 # Sources:
 #   Chapin et al. (2011) "Principles of Terrestrial Ecosystem Ecology"
 #   Sitch et al. (2015) "Recent trends and drivers of regional sources and
 #       sinks of carbon dioxide." Biogeosciences 12, 653–679.
 #   Churkina et al. (2010) urban CO₂ flux estimates.
+#   Kennedy et al. (2011) energy use in cities.
 CO2_FLUX_BY_COVER = {
     "vegetation": -400.0,   # temperate/tropical forest & dense canopy
     "water":       -20.0,   # lakes, rivers (weak net sink)
     "arid":        +20.0,   # bare soil respiration ≈ minimal GPP
-    "urban":      +1500.0,  # combustion + infrastructure (Churkina 2010)
+    "urban":      +600.0,   # fallback — overridden at runtime by density.py
 }
+
+# ── Tree carbon sequestration ─────────────────────────────────────────────────
+# Average CO₂ absorbed by a mature urban tree per year.
+# Source: US Forest Service (Nowak et al. 2013) — urban tree average.
+TREE_CO2_KG_PER_YEAR: float = 21.0   # kgCO₂ / tree / year
+
+# Average canopy cover provided by one street tree (m²)
+TREE_CANOPY_M2: float = 25.0
 
 # Mixed-pixel fallback for unclassified area
 CO2_FLUX_UNCLASSIFIED: float = 0.0
